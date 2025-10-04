@@ -1,6 +1,6 @@
 const express = require('express');
 const Joi = require('joi');
-const db = require('../config/database');
+const Scheme = require('../models/Scheme');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
@@ -10,49 +10,49 @@ const schemeSchema = Joi.object({
   title: Joi.string().min(3).max(255).required(),
   description: Joi.string().min(10).required(),
   eligibility: Joi.string().min(5).required(),
-  link: Joi.string().uri().optional(),
+  link: Joi.string().uri().required(),
   language: Joi.string().min(2).max(50).required(),
-  category: Joi.string().max(100).optional(),
-  is_active: Joi.boolean().default(true)
+  category: Joi.string().max(100).required()
 });
 
 // Get all schemes with optional filters
 router.get('/', async (req, res) => {
   try {
-    const { language, category, is_active = true, page = 1, limit = 10 } = req.query;
+    const { language, category, page = 1, limit = 10 } = req.query;
     
-    let query = db('schemes')
-      .select('*')
-      .where('is_active', is_active === 'true')
-      .orderBy('created_at', 'desc');
-
-    // Apply filters
+    // Build filter object
+    const filter = {};
     if (language) {
-      query = query.where('language', language);
+      filter.language = language;
     }
     if (category) {
-      query = query.where('category', 'like', `%${category}%`);
+      filter.category = { $regex: category, $options: 'i' };
     }
 
-    // Pagination
-    const offset = (page - 1) * limit;
-    const schemes = await query.limit(limit).offset(offset);
+    // Calculate pagination
+    const skip = (page - 1) * limit;
+    
+    // Get schemes with populated user data
+    const schemes = await Scheme.find(filter)
+      .populate('createdBy', 'name')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
     
     // Get total count for pagination
-    let countQuery = db('schemes').where('is_active', is_active === 'true');
-    if (language) countQuery = countQuery.where('language', language);
-    if (category) countQuery = countQuery.where('category', 'like', `%${category}%`);
-    
-    const totalCount = await countQuery.count('* as count').first();
+    const totalCount = await Scheme.countDocuments(filter);
 
     res.json({
       success: true,
       data: {
-        schemes,
+        schemes: schemes.map(scheme => ({
+          ...scheme.toObject(),
+          created_by_name: scheme.createdBy?.name
+        })),
         pagination: {
           currentPage: parseInt(page),
-          totalPages: Math.ceil(totalCount.count / limit),
-          totalItems: totalCount.count,
+          totalPages: Math.ceil(totalCount / limit),
+          totalItems: totalCount,
           itemsPerPage: parseInt(limit)
         }
       }
@@ -71,9 +71,8 @@ router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     
-    const scheme = await db('schemes')
-      .where('id', id)
-      .first();
+    const scheme = await Scheme.findById(id)
+      .populate('createdBy', 'name');
 
     if (!scheme) {
       return res.status(404).json({
@@ -84,7 +83,12 @@ router.get('/:id', async (req, res) => {
 
     res.json({
       success: true,
-      data: { scheme }
+      data: { 
+        scheme: {
+          ...scheme.toObject(),
+          created_by_name: scheme.createdBy?.name
+        }
+      }
     });
   } catch (error) {
     console.error('Get scheme error:', error);
@@ -107,16 +111,25 @@ router.post('/', authenticateToken, requireRole(['admin']), async (req, res) => 
       });
     }
 
-    const [schemeId] = await db('schemes').insert(value);
+    const scheme = new Scheme({
+      ...value,
+      createdBy: req.user._id
+    });
+
+    await scheme.save();
     
-    const newScheme = await db('schemes')
-      .where('id', schemeId)
-      .first();
+    const newScheme = await Scheme.findById(scheme._id)
+      .populate('createdBy', 'name');
 
     res.status(201).json({
       success: true,
       message: 'Scheme created successfully',
-      data: { scheme: newScheme }
+      data: { 
+        scheme: {
+          ...newScheme.toObject(),
+          created_by_name: newScheme.createdBy?.name
+        }
+      }
     });
   } catch (error) {
     console.error('Create scheme error:', error);
@@ -142,7 +155,7 @@ router.put('/:id', authenticateToken, requireRole(['admin']), async (req, res) =
     }
 
     // Check if scheme exists
-    const existingScheme = await db('schemes').where('id', id).first();
+    const existingScheme = await Scheme.findById(id);
     if (!existingScheme) {
       return res.status(404).json({
         success: false,
@@ -150,16 +163,18 @@ router.put('/:id', authenticateToken, requireRole(['admin']), async (req, res) =
       });
     }
 
-    await db('schemes').where('id', id).update(value);
-    
-    const updatedScheme = await db('schemes')
-      .where('id', id)
-      .first();
+    const updatedScheme = await Scheme.findByIdAndUpdate(id, value, { new: true })
+      .populate('createdBy', 'name');
 
     res.json({
       success: true,
       message: 'Scheme updated successfully',
-      data: { scheme: updatedScheme }
+      data: { 
+        scheme: {
+          ...updatedScheme.toObject(),
+          created_by_name: updatedScheme.createdBy?.name
+        }
+      }
     });
   } catch (error) {
     console.error('Update scheme error:', error);
@@ -176,7 +191,7 @@ router.delete('/:id', authenticateToken, requireRole(['admin']), async (req, res
     const { id } = req.params;
 
     // Check if scheme exists
-    const existingScheme = await db('schemes').where('id', id).first();
+    const existingScheme = await Scheme.findById(id);
     if (!existingScheme) {
       return res.status(404).json({
         success: false,
@@ -184,7 +199,7 @@ router.delete('/:id', authenticateToken, requireRole(['admin']), async (req, res
       });
     }
 
-    await db('schemes').where('id', id).del();
+    await Scheme.findByIdAndDelete(id);
 
     res.json({
       success: true,
@@ -205,21 +220,30 @@ router.get('/category/:category', async (req, res) => {
     const { category } = req.params;
     const { language, page = 1, limit = 10 } = req.query;
     
-    let query = db('schemes')
-      .where('category', 'like', `%${category}%`)
-      .where('is_active', true)
-      .orderBy('created_at', 'desc');
+    // Build filter object
+    const filter = {
+      category: { $regex: category, $options: 'i' }
+    };
 
     if (language) {
-      query = query.where('language', language);
+      filter.language = language;
     }
 
-    const offset = (page - 1) * limit;
-    const schemes = await query.limit(limit).offset(offset);
+    const skip = (page - 1) * limit;
+    const schemes = await Scheme.find(filter)
+      .populate('createdBy', 'name')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
 
     res.json({
       success: true,
-      data: { schemes }
+      data: { 
+        schemes: schemes.map(scheme => ({
+          ...scheme.toObject(),
+          created_by_name: scheme.createdBy?.name
+        }))
+      }
     });
   } catch (error) {
     console.error('Get schemes by category error:', error);
@@ -236,25 +260,34 @@ router.get('/search/:query', async (req, res) => {
     const { query } = req.params;
     const { language, page = 1, limit = 10 } = req.query;
     
-    let searchQuery = db('schemes')
-      .where(function() {
-        this.where('title', 'like', `%${query}%`)
-            .orWhere('description', 'like', `%${query}%`)
-            .orWhere('category', 'like', `%${query}%`);
-      })
-      .where('is_active', true)
-      .orderBy('created_at', 'desc');
+    // Build search filter
+    const searchFilter = {
+      $or: [
+        { title: { $regex: query, $options: 'i' } },
+        { description: { $regex: query, $options: 'i' } },
+        { category: { $regex: query, $options: 'i' } }
+      ]
+    };
 
     if (language) {
-      searchQuery = searchQuery.where('language', language);
+      searchFilter.language = language;
     }
 
-    const offset = (page - 1) * limit;
-    const results = await searchQuery.limit(limit).offset(offset);
+    const skip = (page - 1) * limit;
+    const results = await Scheme.find(searchFilter)
+      .populate('createdBy', 'name')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
 
     res.json({
       success: true,
-      data: { results }
+      data: { 
+        results: results.map(scheme => ({
+          ...scheme.toObject(),
+          created_by_name: scheme.createdBy?.name
+        }))
+      }
     });
   } catch (error) {
     console.error('Search schemes error:', error);

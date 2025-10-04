@@ -1,19 +1,22 @@
 const express = require('express');
 const Joi = require('joi');
-const db = require('../config/database');
+const Marketplace = require('../models/Marketplace');
 const { authenticateToken } = require('../middleware/auth');
 
 const router = express.Router();
 
 // Validation schemas
 const marketplaceSchema = Joi.object({
-  business_name: Joi.string().min(2).max(255).required(),
-  owner_name: Joi.string().min(2).max(255).required(),
-  product_service: Joi.string().min(5).required(),
-  contact: Joi.string().min(5).max(255).required(),
+  businessName: Joi.string().min(2).max(255).required(),
+  ownerName: Joi.string().min(2).max(255).required(),
+  productService: Joi.string().min(5).required(),
+  contact: Joi.object({
+    phone: Joi.string().pattern(/^[\+]?[1-9][\d]{0,15}$/).required(),
+    email: Joi.string().email().required(),
+    address: Joi.string().min(10).required()
+  }).required(),
   language: Joi.string().min(2).max(50).required(),
-  location: Joi.string().max(255).optional(),
-  description: Joi.string().max(1000).optional()
+  location: Joi.string().max(255).required()
 });
 
 // Get all marketplace entries with optional filters
@@ -21,38 +24,39 @@ router.get('/', async (req, res) => {
   try {
     const { language, location, page = 1, limit = 10 } = req.query;
     
-    let query = db('marketplace')
-      .select('marketplace.*', 'users.name as created_by_name')
-      .leftJoin('users', 'marketplace.created_by', 'users.id')
-      .orderBy('marketplace.created_at', 'desc');
-
-    // Apply filters
+    // Build filter object
+    const filter = {};
     if (language) {
-      query = query.where('marketplace.language', language);
+      filter.language = language;
     }
     if (location) {
-      query = query.where('marketplace.location', 'like', `%${location}%`);
+      filter.location = { $regex: location, $options: 'i' };
     }
 
-    // Pagination
-    const offset = (page - 1) * limit;
-    const marketplace = await query.limit(limit).offset(offset);
+    // Calculate pagination
+    const skip = (page - 1) * limit;
+    
+    // Get marketplace entries with populated user data
+    const marketplace = await Marketplace.find(filter)
+      .populate('createdBy', 'name')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
     
     // Get total count for pagination
-    let countQuery = db('marketplace');
-    if (language) countQuery = countQuery.where('language', language);
-    if (location) countQuery = countQuery.where('location', 'like', `%${location}%`);
-    
-    const totalCount = await countQuery.count('* as count').first();
+    const totalCount = await Marketplace.countDocuments(filter);
 
     res.json({
       success: true,
       data: {
-        marketplace,
+        marketplace: marketplace.map(item => ({
+          ...item.toObject(),
+          created_by_name: item.createdBy?.name
+        })),
         pagination: {
           currentPage: parseInt(page),
-          totalPages: Math.ceil(totalCount.count / limit),
-          totalItems: totalCount.count,
+          totalPages: Math.ceil(totalCount / limit),
+          totalItems: totalCount,
           itemsPerPage: parseInt(limit)
         }
       }
@@ -71,11 +75,8 @@ router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     
-    const entry = await db('marketplace')
-      .select('marketplace.*', 'users.name as created_by_name')
-      .leftJoin('users', 'marketplace.created_by', 'users.id')
-      .where('marketplace.id', id)
-      .first();
+    const entry = await Marketplace.findById(id)
+      .populate('createdBy', 'name');
 
     if (!entry) {
       return res.status(404).json({
@@ -86,7 +87,12 @@ router.get('/:id', async (req, res) => {
 
     res.json({
       success: true,
-      data: { entry }
+      data: { 
+        entry: {
+          ...entry.toObject(),
+          created_by_name: entry.createdBy?.name
+        }
+      }
     });
   } catch (error) {
     console.error('Get marketplace entry error:', error);
@@ -109,23 +115,25 @@ router.post('/', authenticateToken, async (req, res) => {
       });
     }
 
-    const entryData = {
+    const entry = new Marketplace({
       ...value,
-      created_by: req.user.id
-    };
+      createdBy: req.user._id
+    });
 
-    const [entryId] = await db('marketplace').insert(entryData);
+    await entry.save();
     
-    const newEntry = await db('marketplace')
-      .select('marketplace.*', 'users.name as created_by_name')
-      .leftJoin('users', 'marketplace.created_by', 'users.id')
-      .where('marketplace.id', entryId)
-      .first();
+    const newEntry = await Marketplace.findById(entry._id)
+      .populate('createdBy', 'name');
 
     res.status(201).json({
       success: true,
       message: 'Marketplace entry created successfully',
-      data: { entry: newEntry }
+      data: { 
+        entry: {
+          ...newEntry.toObject(),
+          created_by_name: newEntry.createdBy?.name
+        }
+      }
     });
   } catch (error) {
     console.error('Create marketplace entry error:', error);
@@ -151,7 +159,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
     }
 
     // Check if entry exists and user owns it
-    const existingEntry = await db('marketplace').where('id', id).first();
+    const existingEntry = await Marketplace.findById(id);
     if (!existingEntry) {
       return res.status(404).json({
         success: false,
@@ -159,25 +167,25 @@ router.put('/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    if (existingEntry.created_by !== req.user.id && req.user.role !== 'admin') {
+    if (existingEntry.createdBy.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'You can only update your own marketplace entries'
       });
     }
 
-    await db('marketplace').where('id', id).update(value);
-    
-    const updatedEntry = await db('marketplace')
-      .select('marketplace.*', 'users.name as created_by_name')
-      .leftJoin('users', 'marketplace.created_by', 'users.id')
-      .where('marketplace.id', id)
-      .first();
+    const updatedEntry = await Marketplace.findByIdAndUpdate(id, value, { new: true })
+      .populate('createdBy', 'name');
 
     res.json({
       success: true,
       message: 'Marketplace entry updated successfully',
-      data: { entry: updatedEntry }
+      data: { 
+        entry: {
+          ...updatedEntry.toObject(),
+          created_by_name: updatedEntry.createdBy?.name
+        }
+      }
     });
   } catch (error) {
     console.error('Update marketplace entry error:', error);
@@ -194,7 +202,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
 
     // Check if entry exists and user owns it
-    const existingEntry = await db('marketplace').where('id', id).first();
+    const existingEntry = await Marketplace.findById(id);
     if (!existingEntry) {
       return res.status(404).json({
         success: false,
@@ -202,14 +210,14 @@ router.delete('/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    if (existingEntry.created_by !== req.user.id && req.user.role !== 'admin') {
+    if (existingEntry.createdBy.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'You can only delete your own marketplace entries'
       });
     }
 
-    await db('marketplace').where('id', id).del();
+    await Marketplace.findByIdAndDelete(id);
 
     res.json({
       success: true,
@@ -230,26 +238,33 @@ router.get('/search/:query', async (req, res) => {
     const { query } = req.params;
     const { language, page = 1, limit = 10 } = req.query;
     
-    let searchQuery = db('marketplace')
-      .select('marketplace.*', 'users.name as created_by_name')
-      .leftJoin('users', 'marketplace.created_by', 'users.id')
-      .where(function() {
-        this.where('business_name', 'like', `%${query}%`)
-            .orWhere('product_service', 'like', `%${query}%`)
-            .orWhere('description', 'like', `%${query}%`);
-      })
-      .orderBy('marketplace.created_at', 'desc');
+    // Build search filter
+    const searchFilter = {
+      $or: [
+        { businessName: { $regex: query, $options: 'i' } },
+        { productService: { $regex: query, $options: 'i' } }
+      ]
+    };
 
     if (language) {
-      searchQuery = searchQuery.where('marketplace.language', language);
+      searchFilter.language = language;
     }
 
-    const offset = (page - 1) * limit;
-    const results = await searchQuery.limit(limit).offset(offset);
+    const skip = (page - 1) * limit;
+    const results = await Marketplace.find(searchFilter)
+      .populate('createdBy', 'name')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
 
     res.json({
       success: true,
-      data: { results }
+      data: { 
+        results: results.map(item => ({
+          ...item.toObject(),
+          created_by_name: item.createdBy?.name
+        }))
+      }
     });
   } catch (error) {
     console.error('Search marketplace error:', error);

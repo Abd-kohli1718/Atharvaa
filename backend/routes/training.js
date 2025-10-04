@@ -69,11 +69,8 @@ router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     
-    const content = await db('training_content')
-      .select('training_content.*', 'users.name as created_by_name')
-      .leftJoin('users', 'training_content.created_by', 'users.id')
-      .where('training_content.id', id)
-      .first();
+    const content = await TrainingContent.findById(id)
+      .populate('createdBy', 'name');
 
     if (!content) {
       return res.status(404).json({
@@ -84,7 +81,12 @@ router.get('/:id', async (req, res) => {
 
     res.json({
       success: true,
-      data: { content }
+      data: { 
+        content: {
+          ...content.toObject(),
+          created_by_name: content.createdBy?.name
+        }
+      }
     });
   } catch (error) {
     console.error('Get training content error:', error);
@@ -107,23 +109,25 @@ router.post('/', authenticateToken, requireRole(['entrepreneur', 'admin']), asyn
       });
     }
 
-    const contentData = {
+    const content = new TrainingContent({
       ...value,
-      created_by: req.user.id
-    };
+      createdBy: req.user._id
+    });
 
-    const [contentId] = await db('training_content').insert(contentData);
+    await content.save();
     
-    const newContent = await db('training_content')
-      .select('training_content.*', 'users.name as created_by_name')
-      .leftJoin('users', 'training_content.created_by', 'users.id')
-      .where('training_content.id', contentId)
-      .first();
+    const newContent = await TrainingContent.findById(content._id)
+      .populate('createdBy', 'name');
 
     res.status(201).json({
       success: true,
       message: 'Training content created successfully',
-      data: { content: newContent }
+      data: { 
+        content: {
+          ...newContent.toObject(),
+          created_by_name: newContent.createdBy?.name
+        }
+      }
     });
   } catch (error) {
     console.error('Create training content error:', error);
@@ -149,7 +153,7 @@ router.put('/:id', authenticateToken, requireRole(['entrepreneur', 'admin']), as
     }
 
     // Check if content exists and user owns it (or is admin)
-    const existingContent = await db('training_content').where('id', id).first();
+    const existingContent = await TrainingContent.findById(id);
     if (!existingContent) {
       return res.status(404).json({
         success: false,
@@ -157,25 +161,25 @@ router.put('/:id', authenticateToken, requireRole(['entrepreneur', 'admin']), as
       });
     }
 
-    if (existingContent.created_by !== req.user.id && req.user.role !== 'admin') {
+    if (existingContent.createdBy.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'You can only update your own training content'
       });
     }
 
-    await db('training_content').where('id', id).update(value);
-    
-    const updatedContent = await db('training_content')
-      .select('training_content.*', 'users.name as created_by_name')
-      .leftJoin('users', 'training_content.created_by', 'users.id')
-      .where('training_content.id', id)
-      .first();
+    const updatedContent = await TrainingContent.findByIdAndUpdate(id, value, { new: true })
+      .populate('createdBy', 'name');
 
     res.json({
       success: true,
       message: 'Training content updated successfully',
-      data: { content: updatedContent }
+      data: { 
+        content: {
+          ...updatedContent.toObject(),
+          created_by_name: updatedContent.createdBy?.name
+        }
+      }
     });
   } catch (error) {
     console.error('Update training content error:', error);
@@ -192,7 +196,7 @@ router.delete('/:id', authenticateToken, requireRole(['entrepreneur', 'admin']),
     const { id } = req.params;
 
     // Check if content exists and user owns it (or is admin)
-    const existingContent = await db('training_content').where('id', id).first();
+    const existingContent = await TrainingContent.findById(id);
     if (!existingContent) {
       return res.status(404).json({
         success: false,
@@ -200,14 +204,14 @@ router.delete('/:id', authenticateToken, requireRole(['entrepreneur', 'admin']),
       });
     }
 
-    if (existingContent.created_by !== req.user.id && req.user.role !== 'admin') {
+    if (existingContent.createdBy.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'You can only delete your own training content'
       });
     }
 
-    await db('training_content').where('id', id).del();
+    await TrainingContent.findByIdAndDelete(id);
 
     res.json({
       success: true,
@@ -228,22 +232,27 @@ router.get('/type/:type', async (req, res) => {
     const { type } = req.params;
     const { language, page = 1, limit = 10 } = req.query;
     
-    let query = db('training_content')
-      .select('training_content.*', 'users.name as created_by_name')
-      .leftJoin('users', 'training_content.created_by', 'users.id')
-      .where('training_content.type', type)
-      .orderBy('training_content.created_at', 'desc');
-
+    // Build filter object
+    const filter = { type };
     if (language) {
-      query = query.where('training_content.language', language);
+      filter.language = language;
     }
 
-    const offset = (page - 1) * limit;
-    const content = await query.limit(limit).offset(offset);
+    const skip = (page - 1) * limit;
+    const content = await TrainingContent.find(filter)
+      .populate('createdBy', 'name')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
 
     res.json({
       success: true,
-      data: { content }
+      data: { 
+        content: content.map(item => ({
+          ...item.toObject(),
+          created_by_name: item.createdBy?.name
+        }))
+      }
     });
   } catch (error) {
     console.error('Get training content by type error:', error);

@@ -1,6 +1,7 @@
 const express = require('express');
 const Joi = require('joi');
-const db = require('../config/database');
+const Job = require('../models/Job');
+const User = require('../models/User');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
@@ -19,42 +20,42 @@ router.get('/', async (req, res) => {
   try {
     const { category, location, language, page = 1, limit = 10 } = req.query;
     
-    let query = db('jobs')
-      .select('jobs.*', 'users.name as created_by_name')
-      .leftJoin('users', 'jobs.created_by', 'users.id')
-      .orderBy('jobs.created_at', 'desc');
-
-    // Apply filters
+    // Build filter object
+    const filter = {};
     if (category) {
-      query = query.where('jobs.category', 'like', `%${category}%`);
+      filter.category = { $regex: category, $options: 'i' };
     }
     if (location) {
-      query = query.where('jobs.location', 'like', `%${location}%`);
+      filter.location = { $regex: location, $options: 'i' };
     }
     if (language) {
-      query = query.where('jobs.language', language);
+      filter.language = language;
     }
 
-    // Pagination
-    const offset = (page - 1) * limit;
-    const jobs = await query.limit(limit).offset(offset);
+    // Calculate pagination
+    const skip = (page - 1) * limit;
+    
+    // Get jobs with populated user data
+    const jobs = await Job.find(filter)
+      .populate('createdBy', 'name')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
     
     // Get total count for pagination
-    let countQuery = db('jobs');
-    if (category) countQuery = countQuery.where('category', 'like', `%${category}%`);
-    if (location) countQuery = countQuery.where('location', 'like', `%${location}%`);
-    if (language) countQuery = countQuery.where('language', language);
-    
-    const totalCount = await countQuery.count('* as count').first();
+    const totalCount = await Job.countDocuments(filter);
 
     res.json({
       success: true,
       data: {
-        jobs,
+        jobs: jobs.map(job => ({
+          ...job.toObject(),
+          created_by_name: job.createdBy?.name
+        })),
         pagination: {
           currentPage: parseInt(page),
-          totalPages: Math.ceil(totalCount.count / limit),
-          totalItems: totalCount.count,
+          totalPages: Math.ceil(totalCount / limit),
+          totalItems: totalCount,
           itemsPerPage: parseInt(limit)
         }
       }
@@ -73,11 +74,8 @@ router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     
-    const job = await db('jobs')
-      .select('jobs.*', 'users.name as created_by_name')
-      .leftJoin('users', 'jobs.created_by', 'users.id')
-      .where('jobs.id', id)
-      .first();
+    const job = await Job.findById(id)
+      .populate('createdBy', 'name');
 
     if (!job) {
       return res.status(404).json({
@@ -88,7 +86,12 @@ router.get('/:id', async (req, res) => {
 
     res.json({
       success: true,
-      data: { job }
+      data: { 
+        job: {
+          ...job.toObject(),
+          created_by_name: job.createdBy?.name
+        }
+      }
     });
   } catch (error) {
     console.error('Get job error:', error);
@@ -111,23 +114,25 @@ router.post('/', authenticateToken, async (req, res) => {
       });
     }
 
-    const jobData = {
+    const job = new Job({
       ...value,
-      created_by: req.user.id
-    };
+      createdBy: req.user._id
+    });
 
-    const [jobId] = await db('jobs').insert(jobData);
+    await job.save();
     
-    const newJob = await db('jobs')
-      .select('jobs.*', 'users.name as created_by_name')
-      .leftJoin('users', 'jobs.created_by', 'users.id')
-      .where('jobs.id', jobId)
-      .first();
+    const newJob = await Job.findById(job._id)
+      .populate('createdBy', 'name');
 
     res.status(201).json({
       success: true,
       message: 'Job created successfully',
-      data: { job: newJob }
+      data: { 
+        job: {
+          ...newJob.toObject(),
+          created_by_name: newJob.createdBy?.name
+        }
+      }
     });
   } catch (error) {
     console.error('Create job error:', error);
@@ -153,7 +158,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
     }
 
     // Check if job exists and user owns it
-    const existingJob = await db('jobs').where('id', id).first();
+    const existingJob = await Job.findById(id);
     if (!existingJob) {
       return res.status(404).json({
         success: false,
@@ -161,25 +166,25 @@ router.put('/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    if (existingJob.created_by !== req.user.id && req.user.role !== 'admin') {
+    if (existingJob.createdBy.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'You can only update your own jobs'
       });
     }
 
-    await db('jobs').where('id', id).update(value);
-    
-    const updatedJob = await db('jobs')
-      .select('jobs.*', 'users.name as created_by_name')
-      .leftJoin('users', 'jobs.created_by', 'users.id')
-      .where('jobs.id', id)
-      .first();
+    const updatedJob = await Job.findByIdAndUpdate(id, value, { new: true })
+      .populate('createdBy', 'name');
 
     res.json({
       success: true,
       message: 'Job updated successfully',
-      data: { job: updatedJob }
+      data: { 
+        job: {
+          ...updatedJob.toObject(),
+          created_by_name: updatedJob.createdBy?.name
+        }
+      }
     });
   } catch (error) {
     console.error('Update job error:', error);
@@ -196,7 +201,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
 
     // Check if job exists and user owns it
-    const existingJob = await db('jobs').where('id', id).first();
+    const existingJob = await Job.findById(id);
     if (!existingJob) {
       return res.status(404).json({
         success: false,
@@ -204,14 +209,14 @@ router.delete('/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    if (existingJob.created_by !== req.user.id && req.user.role !== 'admin') {
+    if (existingJob.createdBy.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'You can only delete your own jobs'
       });
     }
 
-    await db('jobs').where('id', id).del();
+    await Job.findByIdAndDelete(id);
 
     res.json({
       success: true,

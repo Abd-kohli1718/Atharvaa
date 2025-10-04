@@ -1,8 +1,7 @@
 const express = require('express');
-const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Joi = require('joi');
-const db = require('../config/database');
+const User = require('../models/User');
 const { authenticateToken } = require('../middleware/auth');
 
 const router = express.Router();
@@ -35,7 +34,7 @@ router.post('/register', async (req, res) => {
     const { name, email, password, role } = value;
 
     // Check if user already exists
-    const existingUser = await db('users').where('email', email).first();
+    const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(409).json({
         success: false,
@@ -43,21 +42,19 @@ router.post('/register', async (req, res) => {
       });
     }
 
-    // Hash password
-    const saltRounds = 12;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
-
-    // Create user
-    const [userId] = await db('users').insert({
+    // Create user (password will be hashed by pre-save middleware)
+    const user = new User({
       name,
       email,
-      password: hashedPassword,
+      password,
       role
     });
 
+    await user.save();
+
     // Generate JWT token
     const token = jwt.sign(
-      { userId, email, role },
+      { userId: user._id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
     );
@@ -67,10 +64,10 @@ router.post('/register', async (req, res) => {
       message: 'User registered successfully',
       data: {
         user: {
-          id: userId,
-          name,
-          email,
-          role
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role
         },
         token
       }
@@ -99,7 +96,7 @@ router.post('/login', async (req, res) => {
     const { email, password } = value;
 
     // Find user
-    const user = await db('users').where('email', email).first();
+    const user = await User.findOne({ email });
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -108,7 +105,7 @@ router.post('/login', async (req, res) => {
     }
 
     // Verify password
-    const isValidPassword = await bcrypt.compare(password, user.password);
+    const isValidPassword = await user.comparePassword(password);
     if (!isValidPassword) {
       return res.status(401).json({
         success: false,
@@ -118,7 +115,7 @@ router.post('/login', async (req, res) => {
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
+      { userId: user._id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
     );
@@ -128,7 +125,7 @@ router.post('/login', async (req, res) => {
       message: 'Login successful',
       data: {
         user: {
-          id: user.id,
+          id: user._id,
           name: user.name,
           email: user.email,
           role: user.role
@@ -148,10 +145,8 @@ router.post('/login', async (req, res) => {
 // Get current user profile
 router.get('/profile', authenticateToken, async (req, res) => {
   try {
-    const user = await db('users')
-      .select('id', 'name', 'email', 'role', 'created_at')
-      .where('id', req.user.id)
-      .first();
+    const user = await User.findById(req.user.id)
+      .select('name email role createdAt');
 
     res.json({
       success: true,

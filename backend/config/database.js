@@ -1,26 +1,18 @@
 // backend/config/database.js
-const mysql = require('mysql2');
-const knex = require('knex');
-// Create a connection to MySQL
-const db = knex({
-  client: 'mysql2',
-  connection: {
-    host: 'localhost',
-    user: 'root',
-    password: 'Tanmay@9972',
-    database: 'bhashaconnect'
+const mongoose = require('mongoose');
+require('dotenv').config();
+
+const connectDB = async () => {
+  try {
+    const mongoURI = process.env.MONGODB_URI || `mongodb://${process.env.DB_HOST || 'localhost'}:${process.env.DB_PORT || 27017}/${process.env.DB_NAME || 'bhashaconnect'}`;
+    
+    const conn = await mongoose.connect(mongoURI);
+
+    console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
+  } catch (error) {
+    console.error('❌ Database connection failed:', error.message);
+    process.exit(1);
   }
-});
+};
 
-
-
-// Connect to MySQL
-// db.connect((err) => {
-//   if (err) {
-//     console.error('❌ Database connection failed:', err.message);
-//     return;
-//   }
-//   console.log('✅ Connected to MySQL database');
-// });
-
-module.exports = db;
+module.exports = connectDB;

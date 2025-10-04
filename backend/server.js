@@ -3,6 +3,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 require('dotenv').config();
 
+const connectDB = require('./config/database');
 const authRoutes = require('./routes/auth');
 const jobsRoutes = require('./routes/jobs');
 const trainingRoutes = require('./routes/training');
@@ -10,7 +11,10 @@ const marketplaceRoutes = require('./routes/marketplace');
 const schemesRoutes = require('./routes/schemes');
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
+
+// Connect to MongoDB
+connectDB();
 
 // Middleware
 app.use(helmet());
